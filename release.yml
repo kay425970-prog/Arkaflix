@@ -1,0 +1,145 @@
+# Builds real installers and publishes them to GitHub Releases.
+#
+# Push a tag and both files appear on your repo's Releases page ~20 minutes later:
+#   git tag v1.0.0 && git push origin v1.0.0
+#
+# Anyone can then download from:
+#   https://github.com/YOUR-USER/YOUR-REPO/releases/latest
+#
+# ---------------------------------------------------------------------------
+# ONE-TIME SETUP (do these before the first tag or this workflow will fail)
+#
+# 1. Deploy the site to a public HTTPS domain. The Android app is a wrapper
+#    around the live site, so Bubblewrap needs the real manifest URL.
+#    Put that URL in the APK_MANIFEST env var below.
+#
+# 2. Add these repository secrets (Settings → Secrets and variables → Actions):
+#      ANDROID_KEYSTORE_BASE64  base64 of your .keystore  (see command below)
+#      ANDROID_KEYSTORE_PASSWORD
+#      ANDROID_KEY_ALIAS
+#      ANDROID_KEY_PASSWORD
+#    Make a keystore with:
+#      keytool -genkeypair -v -keystore arkaflix.keystore -alias arkaflix \
+#        -keyalg RSA -keysize 2048 -validity 10000
+#    Then base64 it:
+#      base64 -w0 arkaflix.keystore        # Linux/macOS
+#      certutil -encode arkaflix.keystore ks.txt   # Windows (copy the body)
+#
+# 3. Windows signing is OPTIONAL. Without a certificate the EXE still installs,
+#    but Windows SmartScreen shows a "unknown publisher" warning. To sign, add
+#    WIN_CSC_LINK and WIN_CSC_KEY_PASSWORD secrets.
+#
+# NOTE: you cannot build a signed Windows EXE on Linux or a signed/notarised
+# macOS DMG on Windows — each platform's signing tools only run on that
+# platform. That is why the jobs run on different runners.
+# ---------------------------------------------------------------------------
+
+name: Release installers
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}   # allows a manual run from the Actions tab
+
+env:
+  # ⬇️ kay425970-prog — this assumes GitHub Pages at your repo named "arkaflix".
+  #    If you deploy elsewhere (Vercel/Netlify) or name the repo differently,
+  #    change this to the real manifest URL. Bubblewrap needs a LIVE https address.
+  APK_MANIFEST: https://kay425970-prog.github.io/arkaflix/manifest.webmanifest
+
+jobs:
+  # ---------------------------------------------------------------- WINDOWS
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build front-end
+        run: npm run build
+
+      - name: Install packaging tools
+        run: npm i -D electron electron-builder
+
+      - name: Build Windows installer
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Optional — leave unset for an unsigned build:
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+        # --publish always uploads the .exe + latest.yml to the GitHub Release
+        run: npx electron-builder --win nsis --publish always
+        # electron-builder reads "build" config from package.json (see BUILD-INSTALLERS.md)
+
+  # ----------------------------------------------------------------- ANDROID
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Bubblewrap needs JDK 17 exactly.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Bubblewrap
+        run: npm i -g @bubblewrap/cli
+
+      - name: Restore signing keystore
+        env:
+          KS: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KS" ]; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 secret is not set. See the comment block at the top of this file."
+            exit 1
+          fi
+          echo "$KS" | base64 -d > "$HOME/arkaflix.keystore"
+
+      # First run creates the TWA project from the live manifest.
+      # Later runs just rebuild it, so the project is cached.
+      - name: Create / refresh the Android project
+        run: |
+          if [ -f twa-manifest.json ]; then
+            bubblewrap update
+          else
+            bubblewrap init --manifest="$APK_MANIFEST" --directory=android
+          fi
+
+      - name: Point the project at the signing key
+        run: |
+          node -e '
+            const fs = require("fs");
+            const f = process.argv[1] === "android" ? "android/twa-manifest.json" : "twa-manifest.json";
+            const p = JSON.parse(fs.readFileSync(f, "utf8"));
+            p.signingKey = { path: process.env.HOME + "/arkaflix.keystore",
+                             alias: process.env.ANDROID_KEY_ALIAS };
+            p.appVersionName = process.env.GITHUB_REF_NAME;
+            fs.writeFileSync(f, JSON.stringify(p, null, 2));
+          ' android
+
+      - name: Build the APK and App Bundle
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: bubblewrap build --skipPwaValidation
+
+      - name: Attach installers to the GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            **/app-release-signed.apk
+            **/app-release-bundle.aab
+          draft: false

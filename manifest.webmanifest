@@ -1,0 +1,17 @@
+{
+  "name": "Arkaflix — Movies & TV",
+  "short_name": "Arkaflix",
+  "description": "Personal cinema: browse, watch and collect films and series.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone"],
+  "orientation": "any",
+  "background_color": "#050505",
+  "theme_color": "#050505",
+  "categories": ["entertainment", "video"],
+  "icons": [
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
